@@ -1,0 +1,1 @@
+DATA_ENCRYPTION_KEY=replace-with-output-from-openssl-rand-base64-32

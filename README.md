@@ -1,5 +1,7 @@
 # 微信 Webhook 通知 Worker
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/llovely45/weixin-webhook-worker)
+
 把 HTTP Webhook 通知转发到微信的 Cloudflare Worker。支持多个微信账号、扫码连接和管理后台；微信账号凭证以 AES-GCM 加密后保存到 Cloudflare D1。服务不需要常驻 OpenClaw Gateway。
 
 ## 功能
@@ -12,9 +14,15 @@
 
 ## 部署到 Cloudflare
 
-需要一个 Cloudflare 账号、Node.js/npm，以及可在 Cloudflare Workers 上部署的账号。以下命令在项目根目录执行。
+需要一个 Cloudflare 账号和一个 GitHub 账号。点击 README 顶部的 **Deploy to Cloudflare** 按钮，登录并授权后，Cloudflare 会将项目复制到你的 GitHub 账号，自动创建和绑定 D1 数据库，并构建部署 Worker。按页面提示生成并设置 `DATA_ENCRYPTION_KEY`；也可以用 `openssl rand -base64 32` 生成随机密钥。请把密钥保存在安全的密码管理器中。
 
-### 1. 下载项目并登录 Cloudflare
+部署完成后，打开 Cloudflare 给出的 Worker 地址并访问 `/admin`，立即设置管理员密码。密码至少 8 个字符，并且包含英文字母、数字和标点或符号。初始化页面没有额外初始化码；设置完成前，访问后台的任何人都可以先完成初始化。
+
+按钮部署会运行 D1 迁移并部署 Worker。若想手动部署，或 Cloudflare 页面没有提示设置密钥，可按下面步骤操作。
+
+### 手动部署：克隆并登录 Cloudflare
+
+需要 Node.js 22 或更新版本。
 
 ```sh
 git clone https://github.com/llovely45/weixin-webhook-worker.git
@@ -23,7 +31,7 @@ npm install
 npx wrangler login
 ```
 
-### 2. 创建 D1 数据库并填写绑定
+### 手动部署：创建 D1 数据库并填写绑定
 
 ```sh
 npx wrangler d1 create weixin-accounts-db
@@ -31,7 +39,7 @@ npx wrangler d1 create weixin-accounts-db
 
 命令会创建数据库并返回数据库 ID。打开 `wrangler.toml`，将 `[[d1_databases]]` 中的 `database_name` 和 `database_id` 改为命令输出的值。`binding` 保持为 `WEIXIN_ACCOUNTS`。
 
-### 3. 创建数据库表
+### 手动部署：创建数据库表
 
 ```sh
 npx wrangler d1 migrations apply weixin-accounts-db --remote
@@ -39,7 +47,7 @@ npx wrangler d1 migrations apply weixin-accounts-db --remote
 
 该命令会应用 `migrations/` 中尚未执行的迁移，创建账号表和管理员凭据表。
 
-### 4. 设置账号加密密钥
+### 手动部署：设置账号加密密钥
 
 生成一条随机密钥：
 
@@ -55,13 +63,13 @@ npx wrangler secret put DATA_ENCRYPTION_KEY
 
 请将密钥保存在密码管理器或其他安全位置。账号数据依赖此密钥解密；丢失或更换密钥会导致已保存的微信账号凭证无法解密。不要将密钥写入源码、`wrangler.toml`、公开仓库或普通环境变量。
 
-### 5. 部署 Worker
+### 手动部署：部署 Worker
 
 ```sh
 npx wrangler deploy
 ```
 
-Wrangler 会输出 Worker URL。打开 `https://<你的 Worker 域名>/admin`，首次进入后台时设置管理员密码。密码至少 8 个字符，并且包含英文字母、数字和标点或符号。初始化页面没有额外初始化码；首次部署后请尽快设置密码，因为在设置完成前，访问后台的任何人都可以先完成初始化。
+Wrangler 会输出 Worker URL。打开 `https://<你的 Worker 域名>/admin` 并立即设置管理员密码。
 
 ### 6. 连接微信账号
 

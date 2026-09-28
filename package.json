@@ -2,8 +2,28 @@
   "name": "weixin-webhook-worker",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
+  "scripts": {
+    "db:migrations:apply": "wrangler d1 migrations apply WEIXIN_ACCOUNTS --remote",
+    "deploy": "npm run db:migrations:apply && wrangler deploy"
+  },
   "dependencies": {
     "qrcode-svg": "1.1.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.142.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "WEIXIN_ACCOUNTS": {
+        "description": "Required D1 database for encrypted WeChat account records. Cloudflare provisions and binds this resource from wrangler.toml."
+      },
+      "DATA_ENCRYPTION_KEY": {
+        "description": "Required Worker secret used to encrypt account records. Generate a strong random value with `openssl rand -base64 32` and keep a secure backup."
+      }
+    }
   }
 }
