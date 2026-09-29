@@ -123,40 +123,56 @@ async function encryptionKey(env) {
   return crypto.subtle.importKey("raw", material, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
 
-export async function encryptRecord(record, env) {
+async function encryptProtectedRecord(record, env, purpose) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await encryptionKey(env);
   const plaintext = encoder.encode(JSON.stringify(record));
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: encoder.encode("weixin-account:v1"), tagLength: 128 },
+    { name: "AES-GCM", iv, additionalData: encoder.encode(purpose), tagLength: 128 },
     key,
     plaintext,
   );
   return `v1.${toBase64Url(iv)}.${toBase64Url(new Uint8Array(ciphertext))}`;
 }
 
-export async function decryptRecord(value, env) {
-  if (typeof value !== "string" || value.length > 64_000) throw new Error("account_record_unreadable");
+async function decryptProtectedRecord(value, env, purpose, errorCode) {
+  if (typeof value !== "string" || value.length > 64_000) throw new Error(errorCode);
   const [version, encodedIv, encodedCiphertext, extra] = value.split(".");
-  if (version !== "v1" || !encodedIv || !encodedCiphertext || extra) throw new Error("account_record_unreadable");
+  if (version !== "v1" || !encodedIv || !encodedCiphertext || extra) throw new Error(errorCode);
   try {
     const key = await encryptionKey(env);
     const plaintext = await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
         iv: fromBase64Url(encodedIv),
-        additionalData: encoder.encode("weixin-account:v1"),
+        additionalData: encoder.encode(purpose),
         tagLength: 128,
       },
       key,
       fromBase64Url(encodedCiphertext),
     );
     const record = JSON.parse(decoder.decode(plaintext));
-    if (!record || typeof record.id !== "string") throw new Error("account_record_unreadable");
+    if (!record || typeof record.id !== "string") throw new Error(errorCode);
     return record;
   } catch {
-    throw new Error("account_record_unreadable");
+    throw new Error(errorCode);
   }
+}
+
+export async function encryptRecord(record, env) {
+  return encryptProtectedRecord(record, env, "weixin-account:v1");
+}
+
+export async function decryptRecord(value, env) {
+  return decryptProtectedRecord(value, env, "weixin-account:v1", "account_record_unreadable");
+}
+
+export async function encryptReminderRecord(record, env) {
+  return encryptProtectedRecord(record, env, "weixin-reminder:v1");
+}
+
+export async function decryptReminderRecord(value, env) {
+  return decryptProtectedRecord(value, env, "weixin-reminder:v1", "reminder_record_unreadable");
 }
 
 export async function hashSecret(secret) {

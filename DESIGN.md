@@ -4,7 +4,7 @@
 
 ## 目标
 
-将已部署的 `weixin-webhook-notify` Worker 扩展为一个可管理多个微信连接的服务。管理员可以登录后台，通过微信扫码连接账号；连接凭证加密后存入 Cloudflare D1；外部系统通过 Webhook 指定账号发送文字通知。发送链路直接调用腾讯微信插件当前使用的 iLink HTTP 接口，不依赖常驻 OpenClaw Gateway。
+将已部署的 `weixin-webhook-notify` Worker 扩展为一个可管理多个微信连接的服务。管理员可以登录后台，通过微信扫码连接账号；连接凭证和提醒正文加密后存入 Cloudflare D1；外部系统通过 Webhook 发送即时通知或创建定时提醒。发送链路直接调用腾讯微信插件当前使用的 iLink HTTP 接口，不依赖常驻 OpenClaw Gateway。
 
 ## 方案比较
 
@@ -39,8 +39,12 @@
 - `PATCH /api/accounts/:id`：修改展示名、默认收件人或轮换 Webhook 密钥。
 - `POST /api/accounts/:id/test-message`：管理员会话鉴权并校验同源后，向账号默认收件人发送固定测试文本。
 - `DELETE /api/accounts/:id`：删除连接。
-- `POST /notify`：以每账号密钥鉴权，接收 `{ "accountId": "...", "text": "..." }`。Worker 从 D1 读取并解密账号记录，按该账号默认收件人发送纯文本。Webhook 调用方不能传入任意收件人。
-- 每 5 分钟 Cron 调用 iLink `getupdates`，保存游标和默认收件人的上下文令牌；不转发或处理入站消息内容。
+- `GET /api/reminders`、`POST /api/reminders`：后台查询或创建提醒。
+- `PATCH /api/reminders/:id`、`DELETE /api/reminders/:id`：后台编辑或删除提醒，包括更换绑定账号；请求要求管理员会话并校验同源。
+- `POST /notify`：以每账号密钥鉴权，接收 `{ "accountId": "...", "text": "..." }` 即时发送；带 `reminder: { "at": "YYYY-MM-DDTHH:mm", "frequency": "once|daily|monthly|yearly", "timezone": "Asia/Shanghai" }` 则创建提醒并返回 `202`。Webhook 调用方不能传入任意收件人、提醒正文或任务绑定账号。
+- 每 5 分钟 Cron 调用 iLink `getupdates`，保存游标和默认收件人的上下文令牌，并领取到期提醒发送；不转发或处理入站消息内容。
+
+提醒保存在 `reminder_tasks` 表中；提醒正文使用 AES-GCM 加密，排期元数据用于 D1 到期索引。一次性提醒发送成功后删除，重复提醒成功后推进到下一次未来周期；发送失败时清除租约并保留错误码，等待后续 Cron 重试。月度及年度日期按月底夹取，例如月末 31 日在短月按最后一天提醒，非闰年的 2 月 29 日按 2 月 28 日提醒。重复任务错过多个周期时只发送一次，不逐次补发。
 
 ## iLink 发送行为
 
@@ -54,7 +58,7 @@ Worker 保持当前已部署实现的文字消息协议：`POST /ilink/bot/sendm
 
 ## 部署与运维
 
-- Wrangler 绑定 `WEIXIN_ACCOUNTS` D1 数据库；当前数据库位于 APAC，建表迁移文件为 `migrations/0001_create_accounts.sql`。旧 KV 已在导入、比对和新版本部署验证后删除；本地保留一份仅含 AES-GCM 密文的备份。
+- Wrangler 绑定 `WEIXIN_ACCOUNTS` D1 数据库；账号、管理员和提醒表通过 `migrations/` 下的顺序迁移创建。旧 KV 已在导入、比对和新版本部署验证后删除；本地保留一份仅含 AES-GCM 密文的备份。
 - 通过 Wrangler Secret 设置 `DATA_ENCRYPTION_KEY`；不得写入仓库或 Worker 静态变量。
 - Worker URL 继续使用 `workers.dev`；`/notify` 只接受 POST、JSON 和每账号 Bearer 密钥；不开放 CORS，不在错误响应或日志中返回 bot token、扫码值或完整上游响应。后台 UI 的脚本、样式和二维码生成不依赖第三方服务。
 - 纯文字通知外的图片、语音、文件、视频和入站消息处理不在此版本范围内。

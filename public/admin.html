@@ -48,20 +48,81 @@
         <div class="hero">
           <div>
             <div class="eyebrow">ACCOUNT DIRECTORY</div>
-            <h1>微信账号</h1>
-            <p class="muted">扫码连接账号，为每个账号配置收件人并生成独立 Webhook 密钥。</p>
+            <h1 id="dashboardTitle">微信账号</h1>
+            <p id="dashboardDescription" class="muted">扫码连接账号，为每个账号配置收件人并生成独立 Webhook 密钥。</p>
           </div>
           <button id="connectButton" class="button button-primary" type="button"><span aria-hidden="true">＋</span> 连接微信</button>
         </div>
 
+        <nav class="view-tabs" aria-label="管理分栏">
+          <button id="accountsTab" class="view-tab active" type="button" aria-current="page">微信账号</button>
+          <button id="remindersTab" class="view-tab" type="button">待办事项</button>
+        </nav>
+
         <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-        <div id="accountList" class="account-list"></div>
-        <div id="emptyState" class="empty-state panel" hidden>
-          <div class="empty-icon" aria-hidden="true">◎</div>
-          <h2>还没有连接账号</h2>
-          <p class="muted">点击“连接微信”，用手机微信扫描二维码完成登录。</p>
-          <button id="emptyConnectButton" class="button button-primary" type="button">连接第一个账号</button>
-        </div>
+        <section id="accountsView">
+          <div id="accountList" class="account-list"></div>
+          <div id="emptyState" class="empty-state panel" hidden>
+            <div class="empty-icon" aria-hidden="true">◎</div>
+            <h2>还没有连接账号</h2>
+            <p class="muted">点击“连接微信”，用手机微信扫描二维码完成登录。</p>
+            <button id="emptyConnectButton" class="button button-primary" type="button">连接第一个账号</button>
+          </div>
+        </section>
+
+        <section id="remindersView" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>定时提醒</h2>
+              <p class="muted">到期后由最近一次 Cron 任务发送。一次性提醒发送成功后会自动移除。</p>
+            </div>
+            <button id="addReminderButton" class="button button-primary" type="button">＋ 添加提醒</button>
+          </div>
+
+          <form id="reminderForm" class="reminder-form panel" hidden>
+            <h3 id="reminderFormTitle">添加提醒</h3>
+            <div class="reminder-form-fields">
+              <label class="field" for="reminderAccountInput">
+                <span>微信账号</span>
+                <select id="reminderAccountInput" required></select>
+              </label>
+              <label class="field field-wide" for="reminderTextInput">
+                <span>提醒内容</span>
+                <textarea id="reminderTextInput" required maxlength="4000" rows="3"></textarea>
+              </label>
+              <label class="field" for="reminderAtInput">
+                <span>提醒时间</span>
+                <input id="reminderAtInput" type="datetime-local" required step="60">
+                <small class="field-help">按填写的 IANA 时区解释此时间。</small>
+              </label>
+              <label class="field" for="reminderFrequencyInput">
+                <span>重复频率</span>
+                <select id="reminderFrequencyInput" required>
+                  <option value="once">一次性</option>
+                  <option value="daily">每天</option>
+                  <option value="monthly">每月</option>
+                  <option value="yearly">每年</option>
+                </select>
+              </label>
+              <label class="field" for="reminderTimezoneInput">
+                <span>时区（IANA）</span>
+                <input id="reminderTimezoneInput" type="text" value="Asia/Shanghai" required maxlength="100" placeholder="Asia/Shanghai">
+              </label>
+            </div>
+            <div class="form-actions">
+              <button id="saveReminderButton" class="button button-primary" type="submit">保存提醒</button>
+              <button id="cancelReminderButton" class="button button-secondary" type="button">取消</button>
+            </div>
+            <p id="reminderFormMessage" class="message" role="status" aria-live="polite"></p>
+          </form>
+
+          <div id="reminderList" class="reminder-list"></div>
+          <div id="reminderEmptyState" class="empty-state panel" hidden>
+            <div class="empty-icon" aria-hidden="true">◷</div>
+            <h2>还没有定时提醒</h2>
+            <p class="muted">点击“添加提醒”创建一个待办任务。</p>
+          </div>
+        </section>
 
         <footer class="page-footer">通知只支持纯文本。微信是否允许主动发送，取决于目标会话及微信服务端策略。</footer>
       </section>

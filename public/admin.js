@@ -11,6 +11,25 @@ const setupConfirmInput = $("#setupConfirmInput");
 const setupMessage = $("#setupMessage");
 const accountList = $("#accountList");
 const emptyState = $("#emptyState");
+const accountsView = $("#accountsView");
+const remindersView = $("#remindersView");
+const dashboardTitle = $("#dashboardTitle");
+const dashboardDescription = $("#dashboardDescription");
+const accountsTab = $("#accountsTab");
+const remindersTab = $("#remindersTab");
+const reminderList = $("#reminderList");
+const reminderEmptyState = $("#reminderEmptyState");
+const reminderForm = $("#reminderForm");
+const reminderFormTitle = $("#reminderFormTitle");
+const reminderFormMessage = $("#reminderFormMessage");
+const reminderAccountInput = $("#reminderAccountInput");
+const reminderTextInput = $("#reminderTextInput");
+const reminderAtInput = $("#reminderAtInput");
+const reminderFrequencyInput = $("#reminderFrequencyInput");
+const reminderTimezoneInput = $("#reminderTimezoneInput");
+const saveReminderButton = $("#saveReminderButton");
+const addReminderButton = $("#addReminderButton");
+const cancelReminderButton = $("#cancelReminderButton");
 const notice = $("#notice");
 const logoutButton = $("#logoutButton");
 const qrDialog = $("#qrDialog");
@@ -33,6 +52,8 @@ let currentPollController = null;
 let pollBusy = false;
 let qrImageUrl = "";
 let pendingVerifyCode = "";
+let connectedAccounts = [];
+let editingReminder = null;
 
 const ERROR_TEXT = {
   invalid_credentials: "密码不正确。",
@@ -53,6 +74,18 @@ const ERROR_TEXT = {
   weixin_send_failed: "微信没有接受这条消息。",
   account_send_not_configured: "账号缺少发送所需配置，请重新连接微信账号。",
   weixin_context_missing: "还没有该收件人的微信会话上下文。请先在微信里给 OpenClaw 发一条消息，等待同步后再发送通知。",
+  account_not_found: "绑定的微信账号不存在，请选择一个已连接账号。",
+  invalid_reminder_schedule: "提醒参数不完整或包含不支持的字段。",
+  invalid_reminder_time: "提醒时间无效，请选择有效的日期和时间。",
+  invalid_reminder_frequency: "提醒频率无效。",
+  invalid_reminder_timezone: "时区无效，请填写 IANA 时区，例如 Asia/Shanghai。",
+  invalid_reminder_account: "请选择一个已连接的微信账号。",
+  unsupported_reminder_field: "提醒中包含不支持的字段。",
+  empty_reminder_update: "没有可保存的提醒变更。",
+  text_required: "请填写提醒内容。",
+  text_too_long: "提醒内容不能超过 4000 个字符。",
+  reminder_in_progress: "该提醒正在投递，请稍后再修改或删除。",
+  reminder_not_found: "提醒任务不存在或已完成。",
   same_origin_required: "请求来源校验失败，请刷新后台后重试。",
   network_error: "网络请求失败，请检查连接后重试。",
   internal_error: "服务暂时不可用，请稍后重试。",
@@ -104,6 +137,13 @@ function errorText(error) {
 
 function showLogin(message = "") {
   stopQrSession();
+  connectedAccounts = [];
+  editingReminder = null;
+  accountList.replaceChildren();
+  reminderList.replaceChildren();
+  reminderForm.hidden = true;
+  reminderForm.reset();
+  populateReminderAccounts("");
   setupPanel.hidden = true;
   dashboardPanel.hidden = true;
   loginPanel.hidden = false;
@@ -128,6 +168,167 @@ function showDashboard() {
   loginPanel.hidden = true;
   dashboardPanel.hidden = false;
   logoutButton.hidden = false;
+  setDashboardView("accounts");
+}
+
+function formatReminderTime(timestamp, timezone) {
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).format(new Date(timestamp));
+  } catch {
+    return new Date(timestamp).toLocaleString();
+  }
+}
+
+function reminderFrequencyLabel(frequency) {
+  return ({ once: "一次性", daily: "每天", monthly: "每月", yearly: "每年" })[frequency] || frequency;
+}
+
+function setReminderFormMessage(message = "") {
+  reminderFormMessage.textContent = message;
+}
+
+function handleReminderError(error, inForm = false) {
+  if (error?.code === "admin_login_required") {
+    showLogin(errorText(error));
+    return;
+  }
+  const message = errorText(error);
+  if (inForm) setReminderFormMessage(message);
+  else showNotice(message, true);
+}
+
+function populateReminderAccounts(selectedId = reminderAccountInput.value) {
+  const options = [document.createElement("option")];
+  options[0].value = "";
+  options[0].textContent = connectedAccounts.length ? "请选择微信账号" : "请先连接微信账号";
+  options[0].disabled = true;
+  options[0].selected = true;
+  for (const account of connectedAccounts) {
+    const option = document.createElement("option");
+    option.value = account.id;
+    option.textContent = `${account.displayName}（${account.id.slice(0, 8)}）`;
+    options.push(option);
+  }
+  reminderAccountInput.replaceChildren(...options);
+  if (connectedAccounts.some((account) => account.id === selectedId)) {
+    reminderAccountInput.value = selectedId;
+  }
+  addReminderButton.disabled = connectedAccounts.length === 0;
+}
+
+function renderReminder(reminder) {
+  const card = document.createElement("article");
+  card.className = "reminder-card";
+
+  const head = document.createElement("div");
+  head.className = "reminder-head";
+  const details = document.createElement("div");
+  details.className = "reminder-details";
+  const account = document.createElement("p");
+  account.className = "reminder-account";
+  account.textContent = reminder.accountName;
+  const nextRun = document.createElement("p");
+  nextRun.className = "reminder-next-run";
+  nextRun.textContent = `下次发送：${formatReminderTime(reminder.nextRunAt, reminder.timezone)}（${reminder.timezone}）`;
+  details.append(account, nextRun);
+
+  const badge = document.createElement("span");
+  badge.className = `reminder-badge${reminder.lastError ? " reminder-badge-error" : ""}`;
+  badge.textContent = reminder.isSending ? "正在发送" : reminder.lastError ? "待重试" : reminderFrequencyLabel(reminder.frequency);
+  head.append(details, badge);
+
+  const text = document.createElement("p");
+  text.className = "reminder-text";
+  text.textContent = reminder.text;
+
+  const meta = document.createElement("p");
+  meta.className = "reminder-meta";
+  meta.textContent = `计划：${reminder.at.replace("T", " ")} · ${reminderFrequencyLabel(reminder.frequency)}`;
+
+  card.append(head, text, meta);
+  if (reminder.lastError) {
+    const error = document.createElement("p");
+    error.className = "reminder-error";
+    error.textContent = `上次发送失败：${ERROR_TEXT[reminder.lastError] || reminder.lastError}；下次 Cron 将重试。`;
+    card.append(error);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "reminder-actions";
+  const editButton = makeButton("编辑", "button-secondary", () => openReminderForm(reminder));
+  const deleteButton = makeButton("删除", "button-danger", async () => {
+    if (!window.confirm(`确定删除这条提醒吗？\n\n${reminder.text}`)) return;
+    deleteButton.disabled = true;
+    try {
+      await api(`/api/reminders/${encodeURIComponent(reminder.id)}`, { method: "DELETE" });
+      showNotice("提醒已删除。");
+      await refreshReminders();
+    } catch (error) {
+      handleReminderError(error);
+      deleteButton.disabled = false;
+    }
+  });
+  editButton.disabled = reminder.isSending;
+  deleteButton.disabled = reminder.isSending;
+  actions.append(editButton, deleteButton);
+  card.append(actions);
+  return card;
+}
+
+function openReminderForm(reminder = null) {
+  if (!connectedAccounts.length) {
+    showNotice("请先连接至少一个微信账号，再创建提醒。", true);
+    return;
+  }
+  editingReminder = reminder;
+  reminderFormTitle.textContent = reminder ? "编辑提醒" : "添加提醒";
+  saveReminderButton.textContent = reminder ? "保存修改" : "保存提醒";
+  reminderTextInput.value = reminder?.text || "";
+  reminderAtInput.value = reminder?.at || "";
+  reminderFrequencyInput.value = reminder?.frequency || "once";
+  reminderTimezoneInput.value = reminder?.timezone || "Asia/Shanghai";
+  populateReminderAccounts(reminder?.accountId || connectedAccounts[0].id);
+  reminderForm.hidden = false;
+  setReminderFormMessage("");
+  reminderTextInput.focus();
+}
+
+function closeReminderForm() {
+  reminderForm.hidden = true;
+  reminderForm.reset();
+  reminderFrequencyInput.value = "once";
+  reminderTimezoneInput.value = "Asia/Shanghai";
+  editingReminder = null;
+  setReminderFormMessage("");
+  populateReminderAccounts(connectedAccounts[0]?.id || "");
+}
+
+function setDashboardView(view) {
+  const showAccounts = view === "accounts";
+  accountsView.hidden = !showAccounts;
+  remindersView.hidden = showAccounts;
+  dashboardTitle.textContent = showAccounts ? "微信账号" : "待办事项";
+  dashboardDescription.textContent = showAccounts
+    ? "扫码连接账号，为每个账号配置收件人并生成独立 Webhook 密钥。"
+    : "管理即将发送和重复发送的微信提醒。";
+  $("#connectButton").hidden = !showAccounts;
+  accountsTab.classList.toggle("active", showAccounts);
+  remindersTab.classList.toggle("active", !showAccounts);
+  if (showAccounts) {
+    accountsTab.setAttribute("aria-current", "page");
+    remindersTab.removeAttribute("aria-current");
+  } else {
+    remindersTab.setAttribute("aria-current", "page");
+    accountsTab.removeAttribute("aria-current");
+  }
 }
 
 function showNotice(message, isError = false) {
@@ -236,7 +437,7 @@ function renderAccount(account) {
       try {
         await api(`/api/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
         showNotice(`已删除“${account.displayName}”。`);
-        await refreshAccounts();
+        await Promise.all([refreshAccounts(), refreshReminders()]);
       } catch (error) {
         if (error.code === "admin_login_required") showLogin(errorText(error));
         else showNotice(errorText(error), true);
@@ -249,10 +450,23 @@ function renderAccount(account) {
 
 async function refreshAccounts() {
   const result = await api("/api/accounts");
-  showDashboard();
+  if (dashboardPanel.hidden) showDashboard();
+  connectedAccounts = result.accounts;
   accountList.replaceChildren(...result.accounts.map(renderAccount));
   emptyState.hidden = result.accounts.length !== 0;
   accountList.hidden = result.accounts.length === 0;
+  populateReminderAccounts();
+}
+
+async function refreshReminders() {
+  const result = await api("/api/reminders");
+  reminderList.replaceChildren(...result.reminders.map(renderReminder));
+  reminderEmptyState.hidden = result.reminders.length !== 0;
+  reminderList.hidden = result.reminders.length === 0;
+}
+
+async function refreshDashboard() {
+  await Promise.all([refreshAccounts(), refreshReminders()]);
 }
 
 function setQrStatus(message) {
@@ -432,6 +646,54 @@ $("#connectButton").addEventListener("click", startQrSession);
 $("#emptyConnectButton").addEventListener("click", startQrSession);
 retryQrButton.addEventListener("click", startQrSession);
 
+accountsTab.addEventListener("click", () => setDashboardView("accounts"));
+remindersTab.addEventListener("click", async () => {
+  setDashboardView("reminders");
+  try {
+    await refreshReminders();
+  } catch (error) {
+    handleReminderError(error);
+  }
+});
+
+addReminderButton.addEventListener("click", () => openReminderForm());
+cancelReminderButton.addEventListener("click", closeReminderForm);
+
+reminderForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setReminderFormMessage("");
+  const body = {
+    accountId: reminderAccountInput.value,
+    text: reminderTextInput.value,
+  };
+  if (!editingReminder || reminderAtInput.value !== editingReminder.at) body.at = reminderAtInput.value;
+  if (!editingReminder || reminderFrequencyInput.value !== editingReminder.frequency) {
+    body.frequency = reminderFrequencyInput.value;
+  }
+  if (!editingReminder || reminderTimezoneInput.value.trim() !== editingReminder.timezone) {
+    body.timezone = reminderTimezoneInput.value.trim();
+  }
+  const originalLabel = editingReminder ? "保存修改" : "保存提醒";
+  saveReminderButton.disabled = true;
+  saveReminderButton.textContent = "正在保存…";
+  try {
+    if (editingReminder) {
+      await api(`/api/reminders/${encodeURIComponent(editingReminder.id)}`, { method: "PATCH", body });
+      showNotice("提醒已更新。");
+    } else {
+      await api("/api/reminders", { method: "POST", body });
+      showNotice("提醒已创建。");
+    }
+    closeReminderForm();
+    await refreshReminders();
+  } catch (error) {
+    handleReminderError(error, true);
+  } finally {
+    saveReminderButton.disabled = false;
+    saveReminderButton.textContent = originalLabel;
+  }
+});
+
 verifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const code = verifyCodeInput.value.trim();
@@ -452,7 +714,7 @@ loginForm.addEventListener("submit", async (event) => {
   try {
     await api("/api/admin/login", { method: "POST", body: { password } });
     passwordInput.value = "";
-    await refreshAccounts();
+    await refreshDashboard();
   } catch (error) {
     passwordInput.value = "";
     loginMessage.textContent = errorText(error);
@@ -479,7 +741,7 @@ setupForm.addEventListener("submit", async (event) => {
     await api("/api/admin/setup", { method: "POST", body: { password } });
     setupPasswordInput.value = "";
     setupConfirmInput.value = "";
-    await refreshAccounts();
+    await refreshDashboard();
   } catch (error) {
     if (error.code === "admin_already_initialized") {
       await initialize();
@@ -508,7 +770,7 @@ async function initialize() {
       showSetup();
       return;
     }
-    await refreshAccounts();
+    await refreshDashboard();
   } catch (error) {
     if (error.code === "admin_login_required") showLogin();
     else showLogin(errorText(error));

@@ -8,9 +8,10 @@
 
 - 在管理后台扫码连接多个微信账号，并分别管理 Webhook 密钥和默认收件人。
 - 每个账号卡片提供“一键发送测试消息”，向该账号的默认收件人发送 `你好！这里是Cloudflare事务宣传部！`。
-- 外部服务调用 `POST /notify`，Worker 直接通过 iLink 协议向微信发送纯文本。
-- D1 保存加密后的账号信息、Webhook 密钥摘要和管理员凭据；源码中不保存密码或加密密钥。
-- Cron 默认每 5 分钟轮询一次 iLink，维护连接并更新收件人的会话上下文。微信消息内容不会转发或处理；这不是完整的 OpenClaw 对话机器人。
+- 外部服务调用 `POST /notify`，Worker 直接通过 iLink 协议向微信发送纯文本；也可在请求中创建一次性或重复提醒。
+- 管理后台的“待办事项”分栏可新增、编辑、删除提醒并更换提醒账号。
+- D1 保存加密后的账号凭证和提醒正文，以及 Webhook 密钥摘要和管理员凭据；源码中不保存密码或加密密钥。
+- Cron 默认每 5 分钟轮询一次 iLink，维护连接、更新收件人的会话上下文并发送到期提醒。微信消息内容不会转发或处理；这不是完整的 OpenClaw 对话机器人。
 
 ## 部署到 Cloudflare
 
@@ -45,7 +46,7 @@ npx wrangler d1 create weixin-accounts-db
 npx wrangler d1 migrations apply weixin-accounts-db --remote
 ```
 
-该命令会应用 `migrations/` 中尚未执行的迁移，创建账号表和管理员凭据表。
+该命令会应用 `migrations/` 中尚未执行的迁移，创建账号、管理员凭据和定时提醒表。
 
 ### 手动部署：设置账号加密密钥
 
@@ -96,6 +97,50 @@ curl -X POST 'https://<你的 Worker 域名>/notify' \
 ```
 
 每个账号使用自己的 Webhook 密钥。接口只会向后台为该账号设置的默认收件人发送纯文本，不接受调用方覆盖收件人；单条消息最多 4000 个字符。轮换密钥后，旧密钥立即失效；删除账号也会撤销对应密钥。
+
+### 创建定时提醒
+
+在请求中加入 `reminder` 对象时，Worker 会创建待办任务并在到期后的最近一次 Cron 扫描中发送。当前 Cron 间隔是 5 分钟，因此正常情况下会在设定时间后的 5 分钟内发送。此时接口返回 `202 Accepted`；不带 `reminder` 的请求仍会立即发送并返回 `200 OK`。
+
+```sh
+curl -X POST 'https://<你的 Worker 域名>/notify' \
+  -H 'Authorization: Bearer <ACCOUNT_WEBHOOK_SECRET>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "accountId":"<ACCOUNT_ID>",
+    "text":"每日上午提醒我检查工单",
+    "reminder":{
+      "at":"2026-10-02T09:30",
+      "frequency":"daily",
+      "timezone":"Asia/Shanghai"
+    }
+  }'
+```
+
+`reminder.at` 必填，格式为 `YYYY-MM-DDTHH:mm`，并按 `timezone` 解释为当地时间。字段说明：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `at` | 是 | 首次提醒时间，例如 `2026-10-02T09:30`。 |
+| `frequency` | 否 | `once`、`daily`、`monthly` 或 `yearly`，默认 `once`。 |
+| `timezone` | 否 | IANA 时区，例如 `Asia/Shanghai`；默认 `Asia/Shanghai`。 |
+
+Webhook 凭据中的账号就是任务绑定的微信账号，调用方不能在 `reminder` 中更换账号或正文。创建成功返回示例：
+
+```json
+{
+  "ok": true,
+  "status": "scheduled",
+  "reminderId": "<REMINDER_ID>",
+  "nextRunAt": "2026-10-02T01:30:00.000Z",
+  "frequency": "daily",
+  "timezone": "Asia/Shanghai"
+}
+```
+
+一次性提醒发送成功后会从 D1 删除；重复提醒成功后会推进到下次时间。发送失败会保留任务并在后续 Cron 重试，错误状态也会显示在后台。月度提醒遇到不存在的日期（如每月 31 日）时使用当月最后一天；年度提醒在非闰年遇到 2 月 29 日时使用 2 月最后一天。若 Cron 错过多个周期，重复提醒只补发一次，然后推进到下一个未来周期。
+
+后台“待办事项”可编辑提醒时间、频率、时区、正文和绑定账号，也可删除任务。删除微信账号时，该账号下的提醒会一并删除。
 
 ## 管理员密码重置
 

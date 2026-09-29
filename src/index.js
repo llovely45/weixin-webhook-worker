@@ -3,6 +3,21 @@ import { createAdminCredential, getAdminCredential } from "./admin-credentials.j
 import { deleteAccount, getAccount, listAccounts, makeAccountId, putAccount } from "./accounts.js";
 import { pollQrLogin, pollUpdates, sendText, startQrLogin } from "./ilink.js";
 import {
+  claimReminder,
+  completeOneTimeReminder,
+  completeRecurringReminder,
+  createReminder,
+  deleteReminder,
+  deleteRemindersForAccount,
+  discardClaimedReminder,
+  failReminder,
+  getReminder,
+  listDueReminderIds,
+  listReminders,
+  updateReminder,
+} from "./reminders.js";
+import { buildReminderSchedule, formatReminderAnchor, nextReminderOccurrence } from "./reminder-time.js";
+import {
   clearSession,
   constantTimeStringEqual,
   createSession,
@@ -79,6 +94,23 @@ function accountSummary(account) {
     defaultRecipient: account.defaultRecipient,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt || null,
+  };
+}
+
+function reminderSummary(reminder, accountNames = new Map()) {
+  return {
+    id: reminder.id,
+    accountId: reminder.accountId,
+    accountName: accountNames.get(reminder.accountId) || reminder.accountId,
+    text: reminder.text,
+    at: formatReminderAnchor(reminder),
+    nextRunAt: reminder.nextRunAt,
+    frequency: reminder.frequency,
+    timezone: reminder.timezone,
+    lastError: reminder.lastError,
+    isSending: Number.isFinite(reminder.leaseUntil) && reminder.leaseUntil > Date.now(),
+    createdAt: reminder.createdAt,
+    updatedAt: reminder.updatedAt,
   };
 }
 
@@ -245,6 +277,95 @@ async function sendAccountText(account, text, env) {
   }
 }
 
+function reminderInputFields(input, { existing = null, fixedAccountId = null, fixedText = undefined, scheduleOnly = false } = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new ApiError(400, "invalid_reminder_schedule");
+  }
+  const allowed = new Set(scheduleOnly ? ["at", "frequency", "timezone"] : ["accountId", "text", "at", "frequency", "timezone"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) throw new ApiError(400, "unsupported_reminder_field");
+
+  const accountId = fixedAccountId || (Object.hasOwn(input, "accountId") ? input.accountId : existing?.accountId);
+  if (typeof accountId !== "string" || !UUID_RE.test(accountId)) {
+    throw new ApiError(400, "invalid_reminder_account");
+  }
+  const text = fixedText !== undefined ? fixedText : Object.hasOwn(input, "text") ? input.text : existing?.text;
+  if (typeof text !== "string" || !text.trim()) throw new ApiError(400, "text_required");
+  if (text.trim().length > MAX_TEXT_LENGTH) throw new ApiError(413, "text_too_long");
+
+  const scheduleTouched = ["at", "frequency", "timezone"].some((key) => Object.hasOwn(input, key));
+  let schedule;
+  if (existing && !scheduleTouched) {
+    schedule = {
+      nextRunAt: existing.nextRunAt,
+      frequency: existing.frequency,
+      timezone: existing.timezone,
+      anchorYear: existing.anchorYear,
+      anchorMonth: existing.anchorMonth,
+      anchorDay: existing.anchorDay,
+      localHour: existing.localHour,
+      localMinute: existing.localMinute,
+    };
+  } else {
+    schedule = buildReminderSchedule({
+      at: Object.hasOwn(input, "at") ? input.at : existing ? formatReminderAnchor(existing) : undefined,
+      frequency: input.frequency === undefined ? existing?.frequency : input.frequency,
+      timezone: input.timezone === undefined ? existing?.timezone : input.timezone,
+    });
+  }
+  return { ...schedule, accountId, text: text.trim() };
+}
+
+async function requireConnectedAccount(env, accountId) {
+  const account = await getAccount(env, accountId);
+  if (!account) throw new ApiError(404, "account_not_found");
+  return account;
+}
+
+async function handleReminders(request, env, url) {
+  if (url.pathname === "/api/reminders") {
+    if (request.method === "GET") {
+      await requireAdmin(request, env);
+      const [reminders, accounts] = await Promise.all([listReminders(env), listAccounts(env)]);
+      const names = new Map(accounts.map((account) => [account.id, account.displayName]));
+      return json({ ok: true, reminders: reminders.map((reminder) => reminderSummary(reminder, names)) });
+    }
+    if (request.method !== "POST") return methodNotAllowed(["GET", "POST"]);
+    await requireAdmin(request, env);
+    requireSameOrigin(request);
+    const input = await readJson(request);
+    const reminder = reminderInputFields(input);
+    const account = await requireConnectedAccount(env, reminder.accountId);
+    const created = await createReminder(env, reminder);
+    return json({ ok: true, reminder: reminderSummary({ ...created, accountId: account.id }, new Map([[account.id, account.displayName]])) }, 201);
+  }
+
+  const match = /^\/api\/reminders\/([0-9a-f-]+)$/iu.exec(url.pathname);
+  if (!match) return null;
+  const reminderId = match[1];
+  if (!UUID_RE.test(reminderId)) throw new ApiError(404, "reminder_not_found");
+  await requireAdmin(request, env);
+  requireSameOrigin(request);
+
+  if (request.method === "DELETE") {
+    const reminder = await getReminder(env, reminderId);
+    if (!reminder) throw new ApiError(404, "reminder_not_found");
+    if (!await deleteReminder(env, reminderId)) throw new ApiError(409, "reminder_in_progress");
+    return json({ ok: true });
+  }
+  if (request.method !== "PATCH") return methodNotAllowed(["PATCH", "DELETE"]);
+
+  const existing = await getReminder(env, reminderId);
+  if (!existing) throw new ApiError(404, "reminder_not_found");
+  if (existing.leaseUntil > Date.now()) throw new ApiError(409, "reminder_in_progress");
+  const input = await readJson(request);
+  if (!Object.keys(input).length) throw new ApiError(400, "empty_reminder_update");
+  const reminder = reminderInputFields(input, { existing });
+  const account = await requireConnectedAccount(env, reminder.accountId);
+  if (!await updateReminder(env, reminderId, reminder)) throw new ApiError(409, "reminder_in_progress");
+  const updated = await getReminder(env, reminderId);
+  return json({ ok: true, reminder: reminderSummary(updated, new Map([[account.id, account.displayName]])) });
+}
+
 async function handleAccounts(request, env, url) {
   if (request.method === "GET" && url.pathname === "/api/accounts") {
     await requireAdmin(request, env);
@@ -271,6 +392,7 @@ async function handleAccounts(request, env, url) {
   if (request.method === "DELETE") {
     const deleted = await deleteAccount(env, accountId);
     if (!deleted) throw new ApiError(404, "account_not_found");
+    await deleteRemindersForAccount(env, accountId);
     return json({ ok: true });
   }
   if (request.method !== "PATCH") return methodNotAllowed(["PATCH", "DELETE"]);
@@ -326,6 +448,23 @@ async function handleNotify(request, env) {
   const suppliedHash = await hashSecret(bearerMatch[1]);
   if (!constantTimeStringEqual(suppliedHash, account.webhookSecretHash)) throw new ApiError(401, "unauthorized");
 
+  if (Object.hasOwn(input, "reminder")) {
+    const reminder = reminderInputFields(input.reminder, {
+      fixedAccountId: account.id,
+      fixedText: text,
+      scheduleOnly: true,
+    });
+    const created = await createReminder(env, reminder);
+    return json({
+      ok: true,
+      status: "scheduled",
+      reminderId: created.id,
+      nextRunAt: new Date(created.nextRunAt).toISOString(),
+      frequency: created.frequency,
+      timezone: created.timezone,
+    }, 202);
+  }
+
   const result = await sendAccountText(account, text, env);
   return json({ ok: true, messageId: result.messageId });
 }
@@ -362,6 +501,34 @@ async function handleScheduled(env) {
   for (let index = 0; index < accounts.length; index += 5) {
     await Promise.all(accounts.slice(index, index + 5).map((account) => pollAccount(env, account)));
   }
+
+  const dueReminderIds = await listDueReminderIds(env);
+  for (let index = 0; index < dueReminderIds.length; index += 5) {
+    await Promise.all(dueReminderIds.slice(index, index + 5).map(async (reminderId) => {
+      const reminder = await claimReminder(env, reminderId);
+      if (!reminder) return;
+      try {
+        const account = await getAccount(env, reminder.accountId);
+        if (!account) {
+          await discardClaimedReminder(env, reminder.id, reminder.leaseToken);
+          return;
+        }
+        await sendAccountText(account, reminder.text, env);
+        if (reminder.frequency === "once") {
+          await completeOneTimeReminder(env, reminder.id, reminder.leaseToken);
+          return;
+        }
+        const nextRunAt = nextReminderOccurrence(reminder, Date.now());
+        await completeRecurringReminder(env, reminder.id, reminder.leaseToken, nextRunAt);
+      } catch (error) {
+        const code = typeof error?.message === "string" && /^[a-z0-9_]{1,64}$/u.test(error.message)
+          ? error.message
+          : "weixin_send_failed";
+        await failReminder(env, reminder.id, reminder.leaseToken, code);
+        console.warn("reminder_delivery_failed", code);
+      }
+    }));
+  }
 }
 
 const ERROR_STATUSES = new Map([
@@ -384,9 +551,20 @@ const ERROR_STATUSES = new Map([
   ["invalid_secret_rotation_request", 400],
   ["empty_account_update", 400],
   ["account_not_found", 404],
+  ["reminder_not_found", 404],
+  ["invalid_reminder_schedule", 400],
+  ["invalid_reminder_time", 400],
+  ["invalid_reminder_frequency", 400],
+  ["invalid_reminder_timezone", 400],
+  ["invalid_reminder_account", 400],
+  ["unsupported_reminder_field", 400],
+  ["empty_reminder_update", 400],
+  ["reminder_in_progress", 409],
   ["invalid_admin_password", 400],
   ["data_encryption_key_not_configured", 503],
   ["account_store_unavailable", 503],
+  ["reminder_record_unreadable", 500],
+  ["reminder_next_occurrence_unavailable", 500],
   ["invalid_channel_version", 503],
   ["weixin_upstream_unreachable", 502],
   ["weixin_upstream_timeout", 504],
@@ -447,6 +625,10 @@ async function route(request, env) {
   }
   if (url.pathname === "/api/accounts" || /^\/api\/accounts\//u.test(url.pathname)) {
     const result = await handleAccounts(request, env, url);
+    if (result) return result;
+  }
+  if (url.pathname === "/api/reminders" || /^\/api\/reminders\//u.test(url.pathname)) {
+    const result = await handleReminders(request, env, url);
     if (result) return result;
   }
   if (url.pathname === "/api/login/start") return handleQrStart(request, env);
